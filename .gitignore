@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environments
+.venv/
+venv/
+env/
+
+# Build / Dist
+.dist/
+build/
+dist/
+
+# Storage (uploaded files)
+storage/
+
+# Environment variables & logs
+.env
+.env.*
+*.log
+
+
