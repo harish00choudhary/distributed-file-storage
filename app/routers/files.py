@@ -1,53 +1,94 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
+from app.db.database import get_db
+from app.models.file_metadata import FileMetadata
+from app.models.file import File as FileModel
+from app.services.file_service import merge_chunks
 import os
-import uuid
+import random
 
 router = APIRouter(prefix="/files", tags=["Files"])
 
-BASE_STORAGE = "storage"
+# -------------------- ABSOLUTE STORAGE PATH --------------------
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+STORAGE_ROOT = os.path.join(BASE_DIR, "storage")
 
-os.makedirs(BASE_STORAGE, exist_ok=True)
+STORAGE_NODES = [
+    os.path.join(STORAGE_ROOT, "node1"),
+    os.path.join(STORAGE_ROOT, "node2"),
+    os.path.join(STORAGE_ROOT, "node3"),
+]
 
+# Create folders if missing
+for node in STORAGE_NODES:
+    os.makedirs(node, exist_ok=True)
 
+# -------------------- START UPLOAD --------------------
+@router.post("/start-upload")
+def start_upload(
+    filename: str = Form(...),
+    user_id: int = Form(...),  # later replace with JWT
+    db: Session = Depends(get_db)
+):
+    new_file = FileModel(
+        filename=filename,
+        owner_id=user_id
+    )
+
+    db.add(new_file)
+    db.commit()
+    db.refresh(new_file)
+
+    return {
+        "message": "File upload initialized",
+        "file_id": new_file.id
+    }
+
+# -------------------- UPLOAD CHUNK --------------------
 @router.post("/upload")
 async def upload_chunk(
     file: UploadFile = File(...),
-    file_id: str = Form(...),
+    file_id: int = Form(...),
     chunk_index: int = Form(...),
+    total_chunks: int = Form(...),
+    db: Session = Depends(get_db)
 ):
-    file_dir = os.path.join(BASE_STORAGE, file_id)
-    os.makedirs(file_dir, exist_ok=True)
+    node = random.choice(STORAGE_NODES)
+    chunk_name = f"{file.filename}.part{chunk_index}"
+    chunk_path = os.path.join(node, chunk_name)
 
-    chunk_path = os.path.join(file_dir, f"chunk_{chunk_index}")
-
+    # Save chunk
     with open(chunk_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
+        f.write(await file.read())
+
+    metadata = FileMetadata(
+        file_id=file_id,
+        filename=file.filename,
+        chunk_name=chunk_name,
+        storage_node=node,
+        total_chunks=total_chunks
+    )
+
+    db.add(metadata)
+    db.commit()
 
     return {
-        "message": "Chunk uploaded",
-        "file_id": file_id,
+        "message": "Chunk stored successfully",
+        "node": os.path.basename(node),
         "chunk_index": chunk_index
     }
-from fastapi.responses import FileResponse
 
+# -------------------- DOWNLOAD --------------------
 @router.get("/download/{file_id}")
-def download_file(file_id: str):
-    file_dir = os.path.join(BASE_STORAGE, file_id)
-
-    if not os.path.exists(file_dir):
-        raise HTTPException(status_code=404, detail="File not found")
-
-    output_file = os.path.join(BASE_STORAGE, f"{file_id}_final")
-
-    with open(output_file, "wb") as outfile:
-        for chunk_name in sorted(os.listdir(file_dir)):
-            chunk_path = os.path.join(file_dir, chunk_name)
-            with open(chunk_path, "rb") as infile:
-                outfile.write(infile.read())
+def download_file(file_id: int, db: Session = Depends(get_db)):
+    try:
+        output_path = merge_chunks(file_id, db)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     return FileResponse(
-        output_file,
-        filename=f"{file_id}.bin",
-        media_type="application/octet-stream"
+        path=output_path,
+        media_type="application/octet-stream",
+        filename=os.path.basename(output_path)
     )

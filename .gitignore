@@ -16,6 +16,8 @@ dist/
 
 # Storage (uploaded files)
 storage/
+app/storage/*
+
 
 # Environment variables & logs
 .env

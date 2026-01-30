@@ -1,63 +1,81 @@
-from fastapi import APIRouter, Depends, HTTPException, Form
+from fastapi import APIRouter, Depends, HTTPException, Form, status
 from sqlalchemy.orm import Session
+from passlib.context import CryptContext
+import hashlib
+
 from app.db.database import get_db
 from app.models.user import User
-import hashlib
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+# -------------------- SECURITY UTILS --------------------
+
+def _pre_hash(password: str) -> str:
+    """SHA256 pre-hash to avoid bcrypt 72-byte limit"""
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
 
 def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+    return pwd_context.hash(_pre_hash(password))
 
 
-@router.post("/register", status_code=201)
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(_pre_hash(plain_password), hashed_password)
+
+
+# -------------------- REGISTER --------------------
+
+@router.post("/register", status_code=status.HTTP_201_CREATED)
 def register(
     username: str = Form(...),
     email: str = Form(...),
     password: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    # check if user already exists
-    existing_user = db.query(User).filter(User.email == email).first()
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
 
-    new_user = User(
+    user = User(
         username=username,
         email=email,
-        password=hash_password(password)
+        hashed_password=hash_password(password)
     )
 
-    db.add(new_user)
+    db.add(user)
     db.commit()
-    db.refresh(new_user)
+    db.refresh(user)
 
     return {
         "message": "User registered successfully",
-        "user_id": new_user.id,
-        "email": new_user.email
+        "user_id": user.id,
+        "email": user.email
     }
+
+
+# -------------------- LOGIN --------------------
+
 @router.post("/login")
 def login(
     email: str = Form(...),
     password: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    hashed_password = hash_password(password)
+    user = db.query(User).filter(User.email == email).first()
 
-    user = (
-        db.query(User)
-        .filter(User.email == email, User.password == hashed_password)
-        .first()
-    )
-
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not user or not verify_password(password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password"
+        )
 
     return {
         "message": "Login successful",
         "user_id": user.id,
-        "username": user.username,
         "email": user.email
     }
